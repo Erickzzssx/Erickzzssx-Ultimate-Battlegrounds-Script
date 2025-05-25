@@ -1,0 +1,250 @@
+-- ================================================
+--    SCRIPT PARA FLUXUS (LISTA + FOLLOW 
+--                + “PRESSÃO” DE HABILIDADE 
+--                + ANTI‐RAGDOLL + ANTI‐ATAQUE)
+-- ================================================
+
+-- 1) Serviços e referências iniciais
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+
+local LocalPlayer = Players.LocalPlayer
+
+-- 2) Estado geral
+local state = {
+    character       = nil,
+    humanoid        = nil,
+    humanoidRoot    = nil,
+    selectedPlayer  = nil,
+    following       = false,
+}
+
+-- 3) Função: quando seu personagem “spawna” (ou respawna)
+local function onCharacterAdded(char)
+    state.character    = char
+    state.humanoidRoot = char:WaitForChild("HumanoidRootPart")
+    state.humanoid     = char:WaitForChild("Humanoid")
+
+    -- 3.1) Anti‐Ragdoll: sempre que entrar em FallingDown ou Ragdoll, já força GettingUp
+    state.humanoid.StateChanged:Connect(function(oldState, newState)
+        if newState == Enum.HumanoidStateType.FallingDown
+        or newState == Enum.HumanoidStateType.Ragdoll then
+            state.humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+        end
+    end)
+
+    -- 3.2) Anti‐Ataque: sempre que a saúde diminuir, restaura para o máximo
+    --       Isso garante imunidade a qualquer dano recebido.
+    state.humanoid.HealthChanged:Connect(function(newHealth)
+        if newHealth < state.humanoid.MaxHealth then
+            -- resetar para o máximo imediatamente
+            state.humanoid.Health = state.humanoid.MaxHealth
+        end
+    end)
+
+    -- 3.3) Opcional: garantir que MaxHealth seja um valor alto (você pode ajustar se quiser)
+    --state.humanoid.MaxHealth = 1e6
+    --state.humanoid.Health = state.humanoid.MaxHealth
+end
+
+-- Se o Character já existir (por exemplo, ao iniciar o script), conecta de imediato
+if LocalPlayer.Character then
+    onCharacterAdded(LocalPlayer.Character)
+end
+LocalPlayer.CharacterAdded:Connect(onCharacterAdded)
+
+-------------------------------------------------
+-- 4) GUI Principal (lista + follow)
+-------------------------------------------------
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "FollowGui"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+-- 4.1) Frame principal (arrastável)
+local MainFrame = Instance.new("Frame", ScreenGui)
+MainFrame.Name = "MainFrame"
+MainFrame.Size = UDim2.new(0, 240, 0, 120)
+MainFrame.Position = UDim2.new(0, 20, 0, 100)
+MainFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+MainFrame.BorderSizePixel = 2
+MainFrame.BackgroundTransparency = 0.2
+MainFrame.Active = true
+MainFrame.Draggable = true
+
+-- 4.2) Botão “Selecionar Jogador”
+local OpenListButton = Instance.new("TextButton", MainFrame)
+OpenListButton.Size = UDim2.new(0, 220, 0, 30)
+OpenListButton.Position = UDim2.new(0, 10, 0, 10)
+OpenListButton.Text = "Selecionar Jogador"
+OpenListButton.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+OpenListButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+OpenListButton.Font = Enum.Font.SourceSansBold
+OpenListButton.TextSize = 18
+OpenListButton.BorderSizePixel = 2
+
+-- 4.3) Botão “Ativar Follow” (toggle)
+local ToggleFollowButton = Instance.new("TextButton", MainFrame)
+ToggleFollowButton.Size = UDim2.new(0, 220, 0, 30)
+ToggleFollowButton.Position = UDim2.new(0, 10, 0, 60)
+ToggleFollowButton.Text = "Ativar Follow"
+ToggleFollowButton.BackgroundColor3 = Color3.fromRGB(70, 130, 180)
+ToggleFollowButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+ToggleFollowButton.Font = Enum.Font.SourceSansBold
+ToggleFollowButton.TextSize = 18
+ToggleFollowButton.BorderSizePixel = 2
+
+-------------------------------------------------
+-- 5) Frame para listar jogadores (filho de MainFrame)
+-------------------------------------------------
+local ListFrame = Instance.new("Frame", MainFrame)
+ListFrame.Name = "ListFrame"
+ListFrame.Size = UDim2.new(0, 240, 0, 300)
+-- Posicionado 10px à direita do MainFrame
+ListFrame.Position = UDim2.new(1, 10, 0, 0)
+ListFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+ListFrame.BorderSizePixel = 2
+ListFrame.Visible = false
+
+-- 5.1) Botão “Fechar” (dentro de ListFrame)
+local CloseListButton = Instance.new("TextButton", ListFrame)
+CloseListButton.Size = UDim2.new(0, 220, 0, 30)
+CloseListButton.Position = UDim2.new(0, 10, 0, 260)
+CloseListButton.Text = "Fechar"
+CloseListButton.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+CloseListButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+CloseListButton.Font = Enum.Font.SourceSansBold
+CloseListButton.TextSize = 18
+CloseListButton.BorderSizePixel = 2
+
+-- 5.2) Função auxiliar: cria cada botão na lista de players
+local function createListButton(name, yPos)
+    local btn = Instance.new("TextButton", ListFrame)
+    btn.Name = "PlayerEntry"
+    btn.Size = UDim2.new(0, 220, 0, 30)
+    btn.Position = UDim2.new(0, 10, 0, yPos)
+    btn.Text = name
+    btn.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    btn.Font = Enum.Font.SourceSansBold
+    btn.TextSize = 16
+    btn.BorderSizePixel = 2
+    return btn
+end
+
+-- 5.3) Atualiza conteúdo de ListFrame (todos os players, exceto você)
+local function updateListFrame()
+    -- Limpa entradas antigas
+    for _, child in ipairs(ListFrame:GetChildren()) do
+        if child:IsA("TextButton") and child.Name == "PlayerEntry" then
+            child:Destroy()
+        end
+    end
+
+    local yPos = 0
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer and plr.Character and plr.Character:FindFirstChild("Head") then
+            local button = createListButton(plr.Name, yPos)
+            button.MouseButton1Click:Connect(function()
+                state.selectedPlayer = plr
+                OpenListButton.Text = "Alvo: " .. plr.Name
+                ListFrame.Visible = false
+            end)
+            yPos = yPos + 35
+        end
+    end
+end
+
+-- 5.4) Abrir/Fechar lista de jogadores
+OpenListButton.MouseButton1Click:Connect(function()
+    if ListFrame.Visible then
+        ListFrame.Visible = false
+    else
+        updateListFrame()
+        ListFrame.Visible = true
+    end
+end)
+CloseListButton.MouseButton1Click:Connect(function()
+    ListFrame.Visible = false
+end)
+
+-- 5.5) Atualiza a lista a cada 10 segundos, se estiver visível
+task.spawn(function()
+    while true do
+        task.wait(10)
+        if ListFrame.Visible then
+            updateListFrame()
+        end
+    end
+end)
+
+-----------------------------------------------------
+-- 6) Toggle de Follow: liga e desliga APENAS pelo botão
+-----------------------------------------------------
+ToggleFollowButton.MouseButton1Click:Connect(function()
+    if not state.selectedPlayer then
+        return
+    end
+
+    state.following = not state.following
+    if state.following then
+        ToggleFollowButton.Text = "Parar Follow"
+    else
+        ToggleFollowButton.Text = "Ativar Follow"
+    end
+end)
+
+-----------------------------------------------------
+-- 7) RenderStepped: “gruda” 3 studs atrás do alvo 
+--    e cancela ragdoll a cada frame (se follow ativo)
+-----------------------------------------------------
+RunService.RenderStepped:Connect(function()
+    if state.following 
+       and state.selectedPlayer 
+       and state.humanoidRoot 
+       and state.humanoidRoot.Parent 
+       and state.selectedPlayer.Character 
+       and state.selectedPlayer.Character:FindFirstChild("HumanoidRootPart") then
+
+        -- 7.1) Anti‐Ragdoll adicional
+        if state.humanoid and (
+           state.humanoid:GetState() == Enum.HumanoidStateType.FallingDown
+        or state.humanoid:GetState() == Enum.HumanoidStateType.Ragdoll
+        ) then
+            state.humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+        end
+
+        -- 7.2) Move você 3 studs atrás do HumanoidRootPart do alvo
+        local targetHRP = state.selectedPlayer.Character.HumanoidRootPart
+        state.humanoidRoot.CFrame = targetHRP.CFrame * CFrame.new(0, 0, 3)
+    end
+end)
+
+-----------------------------------------------------
+-- 8) Captura das teclas 1, 3 ou 4 
+--    (NÃO ATIVA follow - apenas cancela ragdoll se já estiver seguindo)
+-----------------------------------------------------
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.UserInputType == Enum.UserInputType.Keyboard then
+        local kc = input.KeyCode
+        if kc == Enum.KeyCode.One 
+        or kc == Enum.KeyCode.Three 
+        or kc == Enum.KeyCode.Four then
+
+            -- Se follow NÃO estiver ativo, ignora
+            if not state.following then 
+                return 
+            end
+
+            -- Se estiver em ragdoll (FallingDown ou Ragdoll), força GettingUp
+            if state.humanoid and (
+               state.humanoid:GetState() == Enum.HumanoidStateType.FallingDown
+            or state.humanoid:GetState() == Enum.HumanoidStateType.Ragdoll
+            ) then
+                state.humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+            end
+        end
+    end
+end)
