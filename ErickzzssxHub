@@ -1,7 +1,8 @@
 -- ================================================
 --    SCRIPT PARA FLUXUS (LISTA + FOLLOW 
 --                + “PRESSÃO” DE HABILIDADE 
---                + ANTI‐RAGDOLL + ANTI‐ATAQUE)
+--                + ANTI‐RAGDOLL + ANTI‐ATAQUE
+--                + TROLL (SARRAR ATRÁS) COM TOGGLE
 -- ================================================
 
 -- 1) Serviços e referências iniciais
@@ -18,6 +19,9 @@ local state = {
     humanoidRoot    = nil,
     selectedPlayer  = nil,
     following       = false,
+    isTrolling      = false,
+    trollConnection = nil,
+    wasFollowing    = false,
 }
 
 -- 3) Função: quando seu personagem “spawna” (ou respawna)
@@ -35,17 +39,11 @@ local function onCharacterAdded(char)
     end)
 
     -- 3.2) Anti‐Ataque: sempre que a saúde diminuir, restaura para o máximo
-    --       Isso garante imunidade a qualquer dano recebido.
     state.humanoid.HealthChanged:Connect(function(newHealth)
         if newHealth < state.humanoid.MaxHealth then
-            -- resetar para o máximo imediatamente
             state.humanoid.Health = state.humanoid.MaxHealth
         end
     end)
-
-    -- 3.3) Opcional: garantir que MaxHealth seja um valor alto (você pode ajustar se quiser)
-    --state.humanoid.MaxHealth = 1e6
-    --state.humanoid.Health = state.humanoid.MaxHealth
 end
 
 -- Se o Character já existir (por exemplo, ao iniciar o script), conecta de imediato
@@ -55,7 +53,7 @@ end
 LocalPlayer.CharacterAdded:Connect(onCharacterAdded)
 
 -------------------------------------------------
--- 4) GUI Principal (lista + follow)
+-- 4) GUI Principal (lista + follow + troll)
 -------------------------------------------------
 local ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name = "FollowGui"
@@ -65,7 +63,8 @@ ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
 -- 4.1) Frame principal (arrastável)
 local MainFrame = Instance.new("Frame", ScreenGui)
 MainFrame.Name = "MainFrame"
-MainFrame.Size = UDim2.new(0, 240, 0, 120)
+-- A altura aumentada para caber mais botões
+MainFrame.Size = UDim2.new(0, 240, 0, 180)
 MainFrame.Position = UDim2.new(0, 20, 0, 100)
 MainFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
 MainFrame.BorderSizePixel = 2
@@ -94,6 +93,17 @@ ToggleFollowButton.TextColor3 = Color3.fromRGB(255, 255, 255)
 ToggleFollowButton.Font = Enum.Font.SourceSansBold
 ToggleFollowButton.TextSize = 18
 ToggleFollowButton.BorderSizePixel = 2
+
+-- 4.4) Botão “Troll (Sarrar Atrás)” / “Desativar Troll”
+local TrollButton = Instance.new("TextButton", MainFrame)
+TrollButton.Size = UDim2.new(0, 220, 0, 30)
+TrollButton.Position = UDim2.new(0, 10, 0, 110)
+TrollButton.Text = "Troll (Sarrar Atrás)"
+TrollButton.BackgroundColor3 = Color3.fromRGB(180, 70, 70)
+TrollButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+TrollButton.Font = Enum.Font.SourceSansBold
+TrollButton.TextSize = 18
+TrollButton.BorderSizePixel = 2
 
 -------------------------------------------------
 -- 5) Frame para listar jogadores (filho de MainFrame)
@@ -144,7 +154,7 @@ local function updateListFrame()
 
     local yPos = 0
     for _, plr in ipairs(Players:GetPlayers()) do
-        if plr ~= LocalPlayer and plr.Character and plr.Character:FindFirstChild("Head") then
+        if plr ~= LocalPlayer and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
             local button = createListButton(plr.Name, yPos)
             button.MouseButton1Click:Connect(function()
                 state.selectedPlayer = plr
@@ -246,5 +256,81 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
                 state.humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
             end
         end
+    end
+end)
+
+-----------------------------------------------------
+-- 9) Funções de Troll: inicia e para sarrar atrás do alvo indefinidamente
+-----------------------------------------------------
+local function startTroll()
+    if state.isTrolling then return end
+    if not state.selectedPlayer 
+       or not state.selectedPlayer.Character 
+       or not state.selectedPlayer.Character:FindFirstChild("HumanoidRootPart") then
+        return
+    end
+
+    state.isTrolling = true
+    state.wasFollowing = state.following
+    state.following = false
+
+    local baseDistance = 3    -- distância fixa atrás do alvo
+    local amplitude    = 2    -- amplitude do vai-e-vem (em studs)
+    local speed        = math.pi * 2  -- um ciclo completo de seno em 1 segundo
+    local targetHRP    = state.selectedPlayer.Character.HumanoidRootPart
+
+    state.trollConnection = RunService.RenderStepped:Connect(function()
+        if not state.isTrolling then
+            return
+        end
+
+        if targetHRP and state.humanoidRoot then
+            -- ângulo para seno (sem duração fixa)
+            local elapsed = tick()
+            local angle   = elapsed * speed
+            -- seno varia entre −1 e 1; multiplicado pela amplitude
+            local offsetOsc = math.sin(angle) * amplitude
+            -- distância total atrás: baseDistance + offsetOsc
+            local totalZ = baseDistance + offsetOsc
+
+            -- CFrame baseado no HumanoidRootPart do alvo
+            local centerCFrame = targetHRP.CFrame
+
+            -- Aplica offset apenas no eixo Z (sempre atrás)
+            local worldPoint = centerCFrame:ToWorldSpace(CFrame.new(0, 0, totalZ)).p
+
+            -- Calcula o lookAt horizontal para manter você virado para o alvo
+            local dirVector = (targetHRP.Position - worldPoint)
+            dirVector = Vector3.new(dirVector.X, 0, dirVector.Z).Unit
+            local lookCFrame = CFrame.new(worldPoint, worldPoint + dirVector)
+
+            state.humanoidRoot.CFrame = lookCFrame
+        end
+    end)
+end
+
+local function stopTroll()
+    if not state.isTrolling then return end
+    state.isTrolling = false
+
+    if state.trollConnection then
+        state.trollConnection:Disconnect()
+        state.trollConnection = nil
+    end
+
+    -- Retorna ao follow se estava ativo antes do troll
+    if state.wasFollowing then
+        state.following = true
+    end
+end
+
+-- 9.1) Toggle do botão Troll
+TrollButton.MouseButton1Click:Connect(function()
+    if not state.isTrolling then
+        TrollButton.Text = "Desativar Troll"
+        startTroll()
+    else
+        TrollButton.Text = "Troll (Sarrar Atrás)"
+        stopTroll()
     end
 end)
